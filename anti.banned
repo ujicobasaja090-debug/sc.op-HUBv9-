@@ -1,0 +1,487 @@
+-- ====================================================================
+-- scOP HUB | ULTIMATE MASTER EDITION WITH FILTERS (2026 REFRESH)
+-- ====================================================================
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local VirtualUser = game:GetService("VirtualUser")
+local PathfindingService = game:GetService("PathfindingService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Stats = game:GetService("Stats")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+-- ====================================================================
+-- [MISI 1] SERVER-SIDE MOCK & REMOTE MANAGEMENT SYSTEM
+-- ====================================================================
+local StealEvent = ReplicatedStorage:WaitForChild("StealEggEvent", 5)
+if RunService:IsServer() then
+local MAX_INTERACT_DISTANCE = 14
+local COOLDOWN_DELAY = 1.0
+local playerCooldowns = {}
+local activeProcess = {}
+if not StealEvent then
+StealEvent = Instance.new("RemoteEvent")
+StealEvent.Name = "StealEggEvent"
+StealEvent.Parent = ReplicatedStorage
+end
+StealEvent.OnServerEvent:Connect(function(player, targetEgg)
+local character = player.Character
+if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+local root = character.HumanoidRootPart
+local currentTime = os.clock()
+if (currentTime - (playerCooldowns[player.UserId] or 0)) < COOLDOWN_DELAY then return end
+if not targetEgg or not targetEgg:IsA("BasePart") or not targetEgg:IsDescendantOf(workspace) then return end
+if activeProcess[targetEgg] then return end
+if (root.Position - targetEgg.Position).Magnitude > MAX_INTERACT_DISTANCE then return end
+activeProcess[targetEgg] = true
+playerCooldowns[player.UserId] = currentTime
+targetEgg:Destroy()
+task.delay(0.5, function()
+activeProcess[targetEgg] = nil
+end)
+end)
+end
+-- ====================================================================
+-- [MISI 2] MASTER CLEANUP & STATE GUARD SYSTEM
+-- ====================================================================
+if getgenv().scOPCleanup then
+pcall(getgenv().scOPCleanup)
+end
+local Connections = {}
+local OriginalGraphics = {
+Parts = setmetatable({}, {__mode = "k"}),
+Decals = setmetatable({}, {__mode = "k"})
+}
+local UI_TOGGLE_KEY = Enum.KeyCode.RightControl
+local isUiVisible = true
+local savedBaseCFrame = nil
+local lowGraphicsConnection = nil
+local isStealing = false
+local rejoinAttempts = 0
+local LOGICAL_SERVER_CONFIG = {
+BASE_SPEED = 18,
+SAFE_INTERACT_DIST = 14,
+SAFE_COOLDOWN = 0.85
+}
+local featuresState = {
+InstantSteal = false,
+AutoTPBase = true,
+SafeTween = true,
+AutoRejoin = false,
+LowGraphics = false,
+AntiAFK = false,
+TargetArea = "All Areas",
+TargetRarity = "All Rarities"
+}
+-- List Area & Rarity Options untuk Filter
+local AreaList = {"All Areas", "Forest", "Lake", "Desert", "Jungle", "Snow", "Volcano", "Abyss Ocean", "Prehistoric", "Cosmic", "Cherry Blossom", "Titan Temple"}
+local RarityList = {"All Rarities", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine"}
+-- ====================================================================
+-- [MISI 3] CORE UTILITIES & HUMANIZED ENGINE SYSTEM
+-- ====================================================================
+local function getCharacter()
+local char = LocalPlayer.Character
+if char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChildOfClass("Humanoid") then
+return char, char.HumanoidRootPart, char:FindFirstChildOfClass("Humanoid")
+end
+return nil, nil, nil
+end
+local function sendNotification(title, message)
+print("[scOP Master Engine]: " .. title .. " - " .. message)
+end
+local function resolveStealTarget(promptParent)
+if not promptParent then return nil end
+if promptParent:IsA("BasePart") then return promptParent end
+if promptParent:IsA("Model") then
+if promptParent.PrimaryPart then return promptParent.PrimaryPart end
+return promptParent:FindFirstChildWhichIsA("BasePart", true)
+end
+if promptParent.Parent and promptParent.Parent:IsA("Model") then
+return promptParent.Parent:FindFirstChildWhichIsA("BasePart", true)
+end
+return nil
+end
+local function humanDelay(minSec, maxSec)
+task.wait(math.random(minSec * 100, maxSec * 100) / 100)
+end
+local function getDynamicSpeed()
+local ping = 100
+pcall(function()
+local netStats = Stats:FindFirstChild("Network")
+if netStats and netStats:FindFirstChild("ServerStatsItem") and netStats.ServerStatsItem:FindFirstChild("Data Ping") then
+ping = netStats.ServerStatsItem["Data Ping"]:GetValue()
+end
+end)
+local randomVariation = math.random(-2, 2)
+if ping > 150 then
+return math.clamp(16 + randomVariation, 14, 18)
+elseif ping > 80 then
+return math.clamp(18 + randomVariation, 16, 20)
+else
+return math.clamp(LOGICAL_SERVER_CONFIG.BASE_SPEED + randomVariation, 16, 22)
+end
+end
+-- ====================================================================
+-- [MISI 4] NATURAL PATHFINDING & MOVEMENT SYSTEM
+-- ====================================================================
+local function safePhysicalMovement(targetCFrame)
+local char, root, humanoid = getCharacter()
+if not root or not humanoid or humanoid.Health <= 0 then return end
+root.AssemblyLinearVelocity = Vector3.zero
+root.AssemblyAngularVelocity = Vector3.zero
+if featuresState.SafeTween then
+local path = PathfindingService:CreatePath({
+AgentRadius = 2.5,
+AgentHeight = 5,
+AgentCanJump = true,
+WaypointSpacing = 4
+})
+local success = pcall(function()
+path:ComputeAsync(root.Position, targetCFrame.Position)
+end)
+if success and path.Status == Enum.PathStatus.Success then
+local waypoints = path:GetWaypoints()
+for _, waypoint in ipairs(waypoints) do
+if humanoid.Health <= 0 then break end
+humanoid.WalkSpeed = getDynamicSpeed()
+humanoid:MoveTo(waypoint.Position)
+if waypoint.Action == Enum.PathWaypointAction.Jump then
+humanoid.Jump = true
+end
+local reached = false
+local conn
+conn = humanoid.MoveFinished:Connect(function()
+reached = true
+if conn then conn:Disconnect() end
+end)
+local startTick = tick()
+while not reached and (tick() - startTick) < 2 do
+if humanoid.Health <= 0 then break end
+task.wait(0.05)
+end
+if conn then conn:Disconnect() end
+end
+else
+humanoid.WalkSpeed = getDynamicSpeed()
+humanoid:MoveTo(targetCFrame.Position)
+task.wait(1.5)
+end
+humanoid.WalkSpeed = 16
+root.AssemblyLinearVelocity = Vector3.zero
+root.AssemblyAngularVelocity = Vector3.zero
+else
+root.CFrame = targetCFrame
+end
+end
+-- ====================================================================
+-- [MISI 5] USER INTERFACE & COMPONENT BUILDER SYSTEM
+-- ====================================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "scOP_MasterHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PlayerGui
+local OpenBtn = Instance.new("ImageButton", ScreenGui)
+OpenBtn.Name = "OpenToggleButton"
+OpenBtn.Size = UDim2.new(0, 45, 0, 45)
+OpenBtn.Position = UDim2.new(0.02, 0, 0.2, 0)
+OpenBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+OpenBtn.Active = true
+OpenBtn.Draggable = true
+Instance.new("UICorner", OpenBtn).CornerRadius = UDim2.new(0, 10)
+Instance.new("UIStroke", OpenBtn).Color = Color3.fromRGB(0, 180, 216)
+local OpenIcon = Instance.new("TextLabel", OpenBtn)
+OpenIcon.Size = UDim2.new(1, 0, 1, 0)
+OpenIcon.Text = "scOP"
+OpenIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+OpenIcon.Font = Enum.Font.SourceSansBold
+OpenIcon.TextSize = 14
+OpenIcon.BackgroundTransparency = 1
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 320, 0, 520)
+MainFrame.Position = UDim2.new(0.5, -160, 0.5, -260)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+MainFrame.Active = true
+MainFrame.Draggable = true
+Instance.new("UICorner", MainFrame).CornerRadius = UDim2.new(0, 10)
+Instance.new("UIStroke", MainFrame).Color = Color3.fromRGB(0, 180, 216)
+local Header = Instance.new("Frame", MainFrame)
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 40)
+Header.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+Instance.new("UICorner", Header).CornerRadius = UDim2.new(0, 10)
+local Title = Instance.new("TextLabel", Header)
+Title.Size = UDim2.new(1, -15, 1, 0)
+Title.Position = UDim2.new(0, 15, 0, 0)
+Title.Text = "scOP HUB | FILTER EDITION"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.SourceSansBold
+Title.TextSize = 15
+Title.BackgroundTransparency = 1
+local Container = Instance.new("ScrollingFrame", MainFrame)
+Container.Name = "Container"
+Container.Position = UDim2.new(0, 10, 0, 50)
+Container.Size = UDim2.new(1, -20, 1, -60)
+Container.BackgroundTransparency = 1
+Container.ScrollBarThickness = 4
+Container.CanvasSize = UDim2.new(0, 0, 0, 0)
+local Layout = Instance.new("UIListLayout", Container)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+Layout.Padding = UDim2.new(0, 8)
+table.insert(Connections, Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+Container.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 10)
+end))
+local function CreateToggleButton(text, defaultState, callback)
+local btn = Instance.new("TextButton", Container)
+btn.Size = UDim2.new(1, 0, 0, 40)
+btn.Text = "  " .. text
+btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+btn.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+btn.Font = Enum.Font.SourceSansSemibold
+btn.TextSize = 14
+btn.TextXAlignment = Enum.TextXAlignment.Left
+Instance.new("UICorner", btn).CornerRadius = UDim2.new(0, 6)
+local StatusInd = Instance.new("Frame", btn)
+StatusInd.Size = UDim2.new(0, 40, 0, 20)
+StatusInd.Position = UDim2.new(1, -50, 0.5, -10)
+StatusInd.BackgroundColor3 = defaultState and Color3.fromRGB(0, 180, 216) or Color3.fromRGB(50, 50, 60)
+Instance.new("UICorner", StatusInd).CornerRadius = UDim2.new(0, 10)
+local state = defaultState
+table.insert(Connections, btn.MouseButton1Click:Connect(function()
+state = not state
+StatusInd.BackgroundColor3 = state and Color3.fromRGB(0, 180, 216) or Color3.fromRGB(50, 50, 60)
+callback(state)
+end))
+end
+local function CreateActionButton(text, callback)
+local btn = Instance.new("TextButton", Container)
+btn.Size = UDim2.new(1, 0, 0, 40)
+btn.Text = text
+btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+btn.BackgroundColor3 = Color3.fromRGB(0, 119, 182)
+btn.Font = Enum.Font.SourceSansBold
+btn.TextSize = 14
+Instance.new("UICorner", btn).CornerRadius = UDim2.new(0, 6)
+table.insert(Connections, btn.MouseButton1Click:Connect(callback))
+end
+local function CreateDropdown(titleText, optionsList, currentVal, callback)
+local frame = Instance.new("Frame", Container)
+frame.Size = UDim2.new(1, 0, 0, 40)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+Instance.new("UICorner", frame).CornerRadius = UDim2.new(0, 6)
+local label = Instance.new("TextLabel", frame)
+label.Size = UDim2.new(0.5, -10, 1, 0)
+label.Position = UDim2.new(0, 10, 0, 0)
+label.Text = titleText
+label.TextColor3 = Color3.fromRGB(200, 200, 200)
+label.Font = Enum.Font.SourceSansSemibold
+label.TextSize = 13
+label.TextXAlignment = Enum.TextXAlignment.Left
+label.BackgroundTransparency = 1
+local btn = Instance.new("TextButton", frame)
+btn.Size = UDim2.new(0.5, -10, 0.8, 0)
+btn.Position = UDim2.new(0.5, 0, 0.1, 0)
+btn.BackgroundColor3 = Color3.fromRGB(35, 35, 48)
+btn.Text = currentVal
+btn.TextColor3 = Color3.fromRGB(0, 180, 216)
+btn.Font = Enum.Font.SourceSansBold
+btn.TextSize = 12
+Instance.new("UICorner", btn).CornerRadius = UDim2.new(0, 4)
+local currentIndex = 1
+for i, v in ipairs(optionsList) do
+if v == currentVal then currentIndex = i break end
+end
+table.insert(Connections, btn.MouseButton1Click:Connect(function()
+currentIndex = currentIndex + 1
+if currentIndex > #optionsList then
+currentIndex = 1
+end
+local selected = optionsList[currentIndex]
+btn.Text = selected
+callback(selected)
+end))
+end
+-- ====================================================================
+-- [MISI 6] PROXIMITY STEAL & FILTER LOGIC SYSTEM
+-- ====================================================================
+local function checkItemFilters(prompt)
+local actionText = string.lower(prompt.ActionText or "")
+local objectText = string.lower(prompt.ObjectText or "")
+local parentName = string.lower(prompt.Parent and prompt.Parent.Name or "")
+local targetArea = string.lower(featuresState.TargetArea)
+local targetRarity = string.lower(featuresState.TargetRarity)
+-- 1. Validasi Kata Kunci Steal / Egg
+local isStealKeyword = string.find(actionText, "steal") or string.find(actionText, "grab") or string.find(objectText, "steal") or string.find(objectText, "egg") or string.find(parentName, "egg")
+if not isStealKeyword then return false end
+-- 2. Validasi Filter Area (jika tidak "all areas")
+if targetArea ~= "all areas" then
+if not string.find(parentName, targetArea) and not string.find(objectText, targetArea) then
+return false
+end
+end
+-- 3. Validasi Filter Rarity (jika tidak "all rarities")
+if targetRarity ~= "all rarities" then
+if not string.find(parentName, targetRarity) and not string.find(objectText, targetRarity) and not string.find(actionText, targetRarity) then
+return false
+end
+end
+return true
+end
+table.insert(Connections, ProximityPromptService.PromptButtonHoldBegan:Connect(function(prompt, playerWhoTriggered)
+if playerWhoTriggered == LocalPlayer and featuresState.InstantSteal and not isStealing then
+if checkItemFilters(prompt) then
+if featuresState.AutoTPBase and not savedBaseCFrame then
+sendNotification("Peringatan", "Atur Base Location terlebih dahulu!")
+return
+end
+isStealing = true
+prompt.HoldDuration = 0
+humanDelay(0.15, 0.35)
+if fireproximityprompt then
+pcall(fireproximityprompt, prompt)
+end
+task.spawn(function()
+local targetPart = resolveStealTarget(prompt.Parent)
+local _, root = getCharacter()
+if targetPart and root then
+local targetPos = targetPart.Position
+if (root.Position - targetPos).Magnitude <= LOGICAL_SERVER_CONFIG.SAFE_INTERACT_DIST then
+task.wait(0.5)
+if StealEvent then
+StealEvent:FireServer(targetPart)
+end
+if featuresState.AutoTPBase and savedBaseCFrame then
+humanDelay(0.2, 0.4)
+safePhysicalMovement(savedBaseCFrame)
+sendNotification("Status", "Proses Curi Selesai -> Kembali ke Base")
+end
+end
+end
+task.wait(0.3)
+isStealing = false
+end)
+end
+end
+end))
+local function applyPartLowGraphic(v)
+if v:IsA("BasePart") then
+if not OriginalGraphics.Parts[v] then
+OriginalGraphics.Parts[v] = v.Material
+end
+v.Material = Enum.Material.SmoothPlastic
+elseif v:IsA("Decal") or v:IsA("Texture") then
+if not OriginalGraphics.Decals[v] then
+OriginalGraphics.Decals[v] = v.Transparency
+end
+v.Transparency = 1
+end
+end
+local function toggleLowGraphics(state)
+featuresState.LowGraphics = state
+if state then
+for _, v in ipairs(workspace:GetDescendants()) do
+applyPartLowGraphic(v)
+end
+lowGraphicsConnection = workspace.DescendantAdded:Connect(function(v)
+if featuresState.LowGraphics then
+applyPartLowGraphic(v)
+end
+end)
+sendNotification("Graphics", "Mode Hemat Grafik Aktif")
+else
+if lowGraphicsConnection then
+lowGraphicsConnection:Disconnect()
+lowGraphicsConnection = nil
+end
+for part, mat in pairs(OriginalGraphics.Parts) do
+if part and part.Parent then part.Material = mat end
+end
+for decal, trans in pairs(OriginalGraphics.Decals) do
+if decal and decal.Parent then decal.Transparency = trans end
+end
+table.clear(OriginalGraphics.Parts)
+table.clear(OriginalGraphics.Decals)
+sendNotification("Graphics", "Grafik Dikembalikan")
+end
+end
+-- ====================================================================
+-- [MISI 7] FEATURE INITIALIZATION & EVENT LISTENERS
+-- ====================================================================
+CreateActionButton("Set Base Location", function()
+local _, root = getCharacter()
+if root then
+savedBaseCFrame = root.CFrame
+sendNotification("Base Location", "Koordinat Base Tersimpan!")
+end
+end)
+CreateDropdown("Target Area", AreaList, featuresState.TargetArea, function(val)
+featuresState.TargetArea = val
+sendNotification("Filter", "Area diubah ke: " .. val)
+end)
+CreateDropdown("Target Rarity", RarityList, featuresState.TargetRarity, function(val)
+featuresState.TargetRarity = val
+sendNotification("Filter", "Rarity diubah ke: " .. val)
+end)
+CreateToggleButton("Logical Steal Mode", featuresState.InstantSteal, function(val)
+featuresState.InstantSteal = val
+end)
+CreateToggleButton("Auto TP to Base", featuresState.AutoTPBase, function(val)
+featuresState.AutoTPBase = val
+end)
+CreateToggleButton("Natural Path Movement", featuresState.SafeTween, function(val)
+featuresState.SafeTween = val
+end)
+CreateToggleButton("Low Graphics Mode", featuresState.LowGraphics, function(val)
+toggleLowGraphics(val)
+end)
+CreateToggleButton("Auto Rejoin on Disconnect", featuresState.AutoRejoin, function(val)
+featuresState.AutoRejoin = val
+end)
+CreateToggleButton("Anti-AFK Protection", featuresState.AntiAFK, function(val)
+featuresState.AntiAFK = val
+end)
+table.insert(Connections, GuiService.ErrorMessageChanged:Connect(function()
+if featuresState.AutoRejoin and rejoinAttempts < 3 then
+rejoinAttempts = rejoinAttempts + 1
+task.wait(2.5)
+TeleportService:Teleport(game.PlaceId, LocalPlayer)
+end
+end))
+table.insert(Connections, LocalPlayer.Idled:Connect(function()
+if featuresState.AntiAFK then
+VirtualUser:CaptureController()
+VirtualUser:ClickButton1(Vector2.new(math.random(100, 500), math.random(100, 500)))
+end
+end))
+local function ToggleUI()
+isUiVisible = not isUiVisible
+MainFrame.Visible = isUiVisible
+end
+table.insert(Connections, OpenBtn.MouseButton1Click:Connect(ToggleUI))
+table.insert(Connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+if not gameProcessed and input.KeyCode == UI_TOGGLE_KEY then
+ToggleUI()
+end
+end))
+-- ====================================================================
+-- [MISI 8] MASTER UNLOADER & CLEANUP PIPELINE
+-- ====================================================================
+getgenv().scOPCleanup = function()
+if lowGraphicsConnection then
+lowGraphicsConnection:Disconnect()
+end
+for part, mat in pairs(OriginalGraphics.Parts) do
+if part and part.Parent then part.Material = mat end
+end
+for decal, trans in pairs(OriginalGraphics.Decals) do
+if decal and decal.Parent then decal.Transparency = trans end
+end
+for _, conn in ipairs(Connections) do
+if conn then conn:Disconnect() end
+end
+if ScreenGui then ScreenGui:Destroy() end
+end
+sendNotification("Loaded", "scOP Hub Filter Edition SIAP DIGUNAKAN!")
